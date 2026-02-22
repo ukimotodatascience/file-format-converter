@@ -189,6 +189,7 @@ st.write(
 uploaded_file = st.file_uploader("ファイルをアップロード", type=None)
 
 if uploaded_file:
+    raw_bytes = uploaded_file.getvalue()
     source_ext = detect_extension(uploaded_file.name)
     candidates = get_candidates(source_ext)
 
@@ -206,8 +207,14 @@ if uploaded_file:
         dpi = 200
 
         if source_ext == "pdf":
-            raw_for_pdf = uploaded_file.getvalue()
-            page_count = get_pdf_page_count(raw_for_pdf)
+            try:
+                page_count = get_pdf_page_count(raw_bytes)
+            except Exception as e:
+                st.error(
+                    f"PDFの解析に失敗しました。ファイル破損・暗号化・未対応PDFの可能性があります: {e}"
+                )
+                st.stop()
+
             st.caption(f"PDFページ数: {page_count}")
             page_number = st.number_input(
                 "変換するページ番号",
@@ -220,11 +227,10 @@ if uploaded_file:
 
         if st.button("変換する", type="primary"):
             try:
-                raw = uploaded_file.getvalue()
                 converted, mime = convert_file(
                     source_ext,
                     target_ext,
-                    raw,
+                    raw_bytes,
                     page_number=int(page_number),
                     dpi=int(dpi),
                 )
