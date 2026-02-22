@@ -1,5 +1,6 @@
 import io
 import json
+import zipfile
 from pathlib import Path
 from typing import Any, cast
 
@@ -160,6 +161,47 @@ def convert_pdf(
     return out.getvalue(), mime_map[target_ext]
 
 
+def convert_pdf_all_pages(
+    target_ext: str,
+    raw: bytes,
+    dpi: int = 200,
+) -> tuple[bytes, str, list[int], int]:
+    failed_pages: list[int] = []
+    success_count = 0
+    zip_buffer = io.BytesIO()
+
+    with pymupdf.open(stream=raw, filetype="pdf") as doc:
+        if doc.page_count == 0:
+            raise ValueError("PDFにページがありません")
+
+        with zipfile.ZipFile(
+            zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED
+        ) as zf:
+            for page_index in range(doc.page_count):
+                try:
+                    page = doc.load_page(page_index)
+                    scale = dpi / 72.0
+                    matrix = pymupdf.Matrix(scale, scale)
+                    pix = page.get_pixmap(matrix=matrix, alpha=False)
+
+                    image = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                    out = io.BytesIO()
+                    pil_fmt = "JPEG" if target_ext == "jpg" else target_ext.upper()
+                    image.save(out, format=pil_fmt)
+
+                    zf.writestr(f"page_{page_index + 1}.{target_ext}", out.getvalue())
+                    success_count += 1
+                except Exception:
+                    failed_pages.append(page_index + 1)
+
+    if success_count == 0:
+        raise ValueError(
+            "全ページの変換に失敗しました。PDFの内容や設定を確認してください。"
+        )
+
+    return zip_buffer.getvalue(), "application/zip", failed_pages, success_count
+
+
 def convert_file(
     source_ext: str,
     target_ext: str,
@@ -205,6 +247,7 @@ if uploaded_file:
         target_ext = st.selectbox("変換先フォーマットを選択", candidates)
         page_number = 1
         dpi = 200
+        pdf_mode = "single"
 
         if source_ext == "pdf":
             try:
@@ -215,28 +258,54 @@ if uploaded_file:
                 )
                 st.stop()
 
-            st.caption(f"PDFページ数: {page_count}")
-            page_number = st.number_input(
-                "変換するページ番号",
-                min_value=1,
-                max_value=page_count,
-                value=1,
-                step=1,
+            pdf_mode = st.radio(
+                "変換モード",
+                options=["single", "all"],
+                format_func=lambda x: (
+                    "1ページのみ" if x == "single" else "全ページ（ZIPで出力）"
+                ),
+                horizontal=True,
             )
+            st.caption(f"PDFページ数: {page_count}")
+            if pdf_mode == "single":
+                page_number = st.number_input(
+                    "変換するページ番号",
+                    min_value=1,
+                    max_value=page_count,
+                    value=1,
+                    step=1,
+                )
             dpi = st.slider("画像解像度 (DPI)", min_value=72, max_value=300, value=200)
 
         if st.button("変換する", type="primary"):
             try:
-                converted, mime = convert_file(
-                    source_ext,
-                    target_ext,
-                    raw_bytes,
-                    page_number=int(page_number),
-                    dpi=int(dpi),
-                )
-                output_name = f"{Path(uploaded_file.name).stem}.{target_ext}"
+                if source_ext == "pdf" and pdf_mode == "all":
+                    converted, mime, failed_pages, success_count = (
+                        convert_pdf_all_pages(
+                            target_ext=target_ext,
+                            raw=raw_bytes,
+                            dpi=int(dpi),
+                        )
+                    )
+                    output_name = f"{Path(uploaded_file.name).stem}_all_pages.zip"
+                    if failed_pages:
+                        st.warning(
+                            f"{success_count}ページを変換しました。"
+                            f"一部ページは失敗しました: {failed_pages}"
+                        )
+                    else:
+                        st.success(f"全{success_count}ページの変換が完了しました。")
+                else:
+                    converted, mime = convert_file(
+                        source_ext,
+                        target_ext,
+                        raw_bytes,
+                        page_number=int(page_number),
+                        dpi=int(dpi),
+                    )
+                    output_name = f"{Path(uploaded_file.name).stem}.{target_ext}"
+                    st.success("変換が完了しました。")
 
-                st.success("変換が完了しました。")
                 st.download_button(
                     label="変換済みファイルをダウンロード",
                     data=converted,
